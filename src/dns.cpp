@@ -38,15 +38,15 @@ const map<int, string> dns_classes = {
     {1, "IN"}}; // Internet
 
 int main(const int argc, char **argv) {
-    try{
+    try {
         S_Arguments *args = processArguments(argc, argv);
         int client_socket;
         struct hostent *host;              // host structure
         struct sockaddr_in server_address; // server address structure
 
         // Get IP address of DNS server
-        if ((host = gethostbyname(args->server)) == NULL) {
-            throw ResolverException(HOSTNAME_FAILURE, "Error: Unknown DNS server host: " + string(args->server));
+        if ((host = gethostbyname((char *)args->server)) == NULL) {
+            throw ResolverException(HOSTNAME_FAILURE, "Error: Unknown DNS server host: " + string((char *)args->server));
         }
 
         server_address.sin_family = AF_INET; // IPv4
@@ -59,7 +59,7 @@ int main(const int argc, char **argv) {
         }
 
         char buf[BUFSIZE];
-        int size_of_query = createDNSQuery(args, buf);
+        int size_of_query = createDNSQuery(args, (unsigned char *)buf);
 
         printf("\nSending Packet...");
         if (sendto(client_socket, (char *)buf, size_of_query, 0, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
@@ -73,10 +73,11 @@ int main(const int argc, char **argv) {
         if (recvfrom(client_socket, (char *)buf, BUFSIZE, 0, (struct sockaddr *)&server_address, (socklen_t *)&i) < 0) {
             throw ResolverException(SOCKET_FAILURE, "Error: Recvfrom failed");
         }
-        printf("Done\n");
+        printf("Done\n\n");
 
         // Parse DNS response
-        parseDNSResponse((char *)buf, args);
+        parseDNSResponse((unsigned char *)buf, args);
+        delete (args);
     } catch (const ResolverException &e) {
         if (e.returnCode != OK) {
             cerr << e.what() << endl;
@@ -85,18 +86,6 @@ int main(const int argc, char **argv) {
     }
 
     return OK;
-}
-
-/**
- * @brief Print the hexadecimal representation of the data
- * @param data Pointer to the data
- * @param dataSize Size of the data
- */
-void printHex(const char *data, size_t dataSize) {
-    for (size_t i = 0; i < dataSize; i++) {
-        printf("%02X ", data[i]);
-    }
-    printf("\n");
 }
 
 /**
@@ -122,7 +111,7 @@ S_Arguments *processArguments(int argc, char *argv[]) {
             args->record_type = 28;
             break;
         case 's':
-            args->server = optarg;
+            args->server = (unsigned char *)optarg;
             break;
         case 'p':
             args->port = atoi(optarg);
@@ -134,7 +123,7 @@ S_Arguments *processArguments(int argc, char *argv[]) {
 
     // Get query
     if (optind < argc) {
-        args->query = argv[optind];
+        args->query = (unsigned char *)argv[optind];
     }
 
     // Check if the required argument (-s) is provided
@@ -151,60 +140,63 @@ S_Arguments *processArguments(int argc, char *argv[]) {
 }
 
 /**
- * @brief Parse DNS response
- * @param buffer Buffer with the DNS response
- * @param args Pointer to the structure with command line arguments
+ * @brief Parse section of the DNS response, e.g. answer section, suports only A, AAAA, CNAME, SOA and PTR records
+ * @param section_start Pointer to the start of the section
+ * @param buffer Pointer to the buffer with the DNS response, used for DNS Compression pointer
+ * @param n Number of records in the section
  */
-void parseDNSResponse(char *buffer, S_Arguments *args) {
-    // Print flag values
-    struct dns_header *dns = (struct dns_header *)buffer;
-    printf("Authoritative: %s, Recursive: %s, Truncated: %s\n", dns->aa ? "Yes" : "No", dns->rd ? "Yes" : "No", dns->tc ? "Yes" : "No");
-
-    // Print question section
-    printf("Question section (%d)\n", ntohs(dns->q_count));
-    char *qname = (char *)(buffer + sizeof(struct dns_header));
-    struct dns_question *qinfo = (struct dns_question *)(buffer + sizeof(struct dns_header) + strlen((const char *)qname) + 1);
-    printf("%s, %s, %d\n", addDotsToName(qname), (dns_record_types.find(ntohs(qinfo->qtype))->second).c_str(), ntohs(qinfo->qclass));
-
-    // Print answer section
-    printf("Answer section (%d)\n", ntohs(dns->ans_count));
-    char *rdata;
-
+unsigned char *parseSection(unsigned char *section_start, unsigned char *buffer, size_t n) {
+    unsigned char *rdata;
     // Start of the answer section
-    char *answer_start = (char *)(buffer + sizeof(struct dns_header) + strlen((const char *)qname) + 1 + sizeof(struct dns_question));
-    // printHex((const char*)answer_start, 122);
+    unsigned char *answer_start = section_start;
 
-    for (int i = 0; i < ntohs(dns->ans_count); i++) {
-        qname = (char *)(answer_start);
-        struct dns_resource_record *answer = (struct dns_resource_record *)(answer_start + (strlen((const char *)qname) + 1));
-        rdata = (char *)((char *)answer + sizeof(struct dns_resource_record));
+    if (n == 0 || section_start == NULL) {
+        return NULL;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        unsigned char *qname = (unsigned char *)(answer_start);
+        // Check for DNS Compression pointer - RFC 1035 4.1.4 Message compression
+        int qname_length = 0;
+        if ((qname[0] & 0xC0) == 0xC0) {
+            qname = (unsigned char *)(buffer + (qname[0] & 0x3F) * 256 + qname[1]);
+            qname_length = 2;
+        } else {
+            qname_length = strlen((const char *)qname) + 1;
+        }
+
+        struct dns_resource_record *answer = (struct dns_resource_record *)(answer_start + qname_length);
+        rdata = ((unsigned char *)answer + sizeof(struct dns_resource_record));
+        printHex(answer_start, sizeof(struct dns_resource_record) + ntohs(answer->data_len));
         const char *type = (dns_record_types.find(ntohs(answer->type))->second).c_str();
         const char *class_ = (dns_classes.find(ntohs(answer->_class))->second).c_str();
-        const char *name = addDotsToName(qname);
+        unsigned char *name = addDotsToName(qname);
+        unsigned char *mname;
+        unsigned char *mailbox;
+        soa_record *soa;
 
-        char *ip_buf;
-
+        printf("Type: %d\n", ntohs(answer->type));
         switch (ntohs(answer->type)) {
         case 1: // A
-            ip_buf = (char *)malloc(INET_ADDRSTRLEN);
-            if (ip_buf == NULL) {
-                throw ResolverException(MEMORY_ALLOCATION_FAILURE, "Memory allocation failed");
-            }
+            char ip_buf[INET_ADDRSTRLEN];
             printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), inet_ntop(AF_INET, rdata, ip_buf, INET_ADDRSTRLEN));
             break;
         case 5: // CNAME
-            // printHex(rdata, 16);
             printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), addDotsToName(rdata));
+            break;
+        case 6: // SOA
+            printf("%s, %s, %s, %d\n", name, type, class_, ntohl(answer->ttl));
+            mname = (unsigned char *)rdata;
+            mailbox = mname + strlen((const char *)mname) + 1;
+            soa = (soa_record *)(rdata + strlen((const char *)mname) + 1 + strlen((const char *)mailbox) + 1);
+            printf("%s, %s, %d, %d, %d, %d, %d\n", addDotsToName(mname), addDotsToName(mailbox), ntohl(soa->serial), ntohl(soa->refresh), ntohl(soa->retry), ntohl(soa->expire), ntohl(soa->minimum));
             break;
         case 12: // PTR
             printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), addDotsToName(rdata));
             break;
         case 28: // AAAA
-            ip_buf = (char *)malloc(INET_ADDRSTRLEN);
-            if (ip_buf == NULL) {
-                throw ResolverException(MEMORY_ALLOCATION_FAILURE, "Memory allocation failed");
-            }
-            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), inet_ntop(AF_INET6, rdata, ip_buf, INET6_ADDRSTRLEN));
+            char ip6_buf[INET6_ADDRSTRLEN];
+            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), inet_ntop(AF_INET6, rdata, ip6_buf, INET6_ADDRSTRLEN));
             break;
         default:
             throw ResolverException(OTHER_FAILURE, "Error: Unknown record type");
@@ -212,7 +204,47 @@ void parseDNSResponse(char *buffer, S_Arguments *args) {
         }
 
         // Move to the next answer
-        answer_start += strlen((const char *)qname) + 1 + 10 + ntohs(answer->data_len);
+        answer_start = (unsigned char *)answer + sizeof(struct dns_resource_record) + ntohs(answer->data_len);
+        free(name);
+    }
+
+    // Return the pointer to the start of the next section
+    return answer_start;
+}
+
+/**
+ * @brief Parse DNS response
+ * @param buffer Buffer with the DNS response
+ * @param args Pointer to the structure with command line arguments
+ */
+void parseDNSResponse(unsigned char *buffer, S_Arguments *args) {
+    // Print flag values
+    struct dns_header *dns = (struct dns_header *)buffer;
+    printf("Authoritative: %s, Recursive: %s, Truncated: %s\n", dns->aa ? "Yes" : "No", dns->rd ? "Yes" : "No", dns->tc ? "Yes" : "No");
+
+    // Print question section
+    printf("Question section (%d)\n", ntohs(dns->q_count));
+    unsigned char *qname = (unsigned char *)(buffer + sizeof(struct dns_header));
+    struct dns_question *qinfo = (struct dns_question *)(buffer + sizeof(struct dns_header) + strlen((const char *)qname) + 1);
+    unsigned char *domain_name = addDotsToName(qname);
+    printf("%s, %s, %d\n", domain_name, (dns_record_types.find(ntohs(qinfo->qtype))->second).c_str(), ntohs(qinfo->qclass));
+    free(domain_name);
+
+    // Print answer section
+    unsigned char *next_start = buffer + sizeof(struct dns_header) + strlen((const char *)qname) + 1 + sizeof(struct dns_question);
+    if (ntohs(dns->ans_count) > 0) {
+        printf("Answer section (%d)\n", ntohs(dns->ans_count));
+        next_start = parseSection(buffer + sizeof(struct dns_header) + strlen((const char *)qname) + 1 + sizeof(struct dns_question), buffer, ntohs(dns->ans_count));
+    }
+    // Print authority section
+    if (ntohs(dns->auth_count) > 0) {
+        printf("Authority section (%d)\n", ntohs(dns->auth_count));
+        next_start = parseSection(next_start, buffer, ntohs(dns->auth_count));
+    }
+    // Print additional section
+    if (ntohs(dns->add_count) > 0) {
+        printf("Additional section (%d)\n", ntohs(dns->add_count));
+        next_start = parseSection(next_start, buffer, ntohs(dns->add_count));
     }
 }
 
@@ -222,7 +254,7 @@ void parseDNSResponse(char *buffer, S_Arguments *args) {
  * @param buf_ptr Pointer to the buffer that will be sent to the server
  * @return Size of the created query
  */
-int createDNSQuery(S_Arguments *args, char *buf_ptr) {
+int createDNSQuery(S_Arguments *args, unsigned char *buf_ptr) {
     struct dns_header *dns = (struct dns_header *)buf_ptr;
 
     dns->id = (unsigned short)htons(getpid());
@@ -241,16 +273,19 @@ int createDNSQuery(S_Arguments *args, char *buf_ptr) {
     dns->auth_count = 0;
     dns->add_count = 0;
 
-    char *qname;
+    unsigned char *qname;
     if (args->inverse_query) {
-        qname = createQname(reverse_ip_address(args->query));
+        unsigned char *ptrDomain = reverse_ip_address(args->query);
+        printf("PTR domain: %s\n", ptrDomain);
+        qname = createQname(ptrDomain);
+        free(ptrDomain);
     } else {
         qname = createQname(args->query);
     }
     if (qname == NULL) {
         throw ResolverException(OTHER_FAILURE, "Qname creation failed");
     }
-    char *qname_ptr = buf_ptr + sizeof(struct dns_header);
+    unsigned char *qname_ptr = buf_ptr + sizeof(struct dns_header);
     memcpy(qname_ptr, qname, strlen((const char *)qname) + 1); // Include the null-terminator
 
     struct dns_question *qinfo = (struct dns_question *)(buf_ptr + sizeof(struct dns_header) + strlen((const char *)qname) + 1);
@@ -267,7 +302,7 @@ int createDNSQuery(S_Arguments *args, char *buf_ptr) {
  * @param query Convert this address to qname
  * @return String with qname
  */
-char *createQname(char *input) {
+unsigned char *createQname(unsigned char *input) {
     printf("In createQname\n");
     printf("Query is: %s\n", input);
 
@@ -275,46 +310,33 @@ char *createQname(char *input) {
     if (input == NULL) return NULL;
 
     const char delimiter[] = ".";
-    char *inputCopy = strdup(input); // Create a copy because strtok modifies the input
-    int qnameLength = 0;
-    char *token;
-
-    // Calculate the length of the qname as the sum of the lengths of the labels + 1 byte for each label's length byte
-    token = strtok(inputCopy, delimiter); // Get the first token
-    while (token != NULL) {
-        qnameLength += strlen(token) + 1;
-        token = strtok(NULL, delimiter);
-    }
+    unsigned char *inputCopy = input; // Create a copy because strtok modifies the input
+    int qnameLength = strlen((const char *)inputCopy);
+    unsigned char *token;
 
     // Allocate memory for the qname
-    char *result = (char *)malloc(qnameLength + 1); // Add 1 byte for the null terminator
+    unsigned char *result = (unsigned char *)calloc(qnameLength + 2, sizeof(unsigned char *)); // +2 for the null-terminator and the first length byte
     if (result == NULL) {
         throw ResolverException(MEMORY_ALLOCATION_FAILURE, "Memory allocation failed");
     }
 
-    char *resultPtr = result;
+    unsigned char *resultPtr = result;
 
-    inputCopy = strdup(input);
-    token = strtok(inputCopy, delimiter);
+    inputCopy = input;
+    token = (unsigned char *)strtok((char *)inputCopy, delimiter);
 
     while (token != NULL) {
-        int charCount = strlen(token);
+        int charCount = strlen((char *)token);
         *resultPtr++ = (char)charCount;
         memcpy(resultPtr, token, charCount);
         resultPtr += charCount;
-        token = strtok(NULL, delimiter);
+        token = (unsigned char *)strtok(NULL, delimiter);
     }
-
-    free(inputCopy);
 
     *resultPtr = '\0'; // Null-terminate the qname
 
     // DEBUG
-    printf("Qname is: ");
-    for (int i = 0; result[i] != '\0'; i++) {
-        printf("\\x%02X", result[i]);
-    }
-    printf("\n");
+    printf("Qname is: %s\n", result);
 
     return result;
 }
@@ -324,15 +346,15 @@ char *createQname(char *input) {
  * @param qname Name with labels without dots
  * @return Name with dots between labels
  */
-char *addDotsToName(char *qname) {
+unsigned char *addDotsToName(unsigned char *qname) {
     int qname_len = strlen((const char *)qname);
-    char *domain_name = (char *)malloc(qname_len + 1); // +1 for the null-terminator
+    unsigned char *domain_name = (unsigned char *)malloc(qname_len + 1); // +1 for the null-terminator
     if (domain_name == NULL) {
         throw ResolverException(MEMORY_ALLOCATION_FAILURE, "Memory allocation failed");
     }
 
-    char *current = domain_name;
-    const char *qname_end = qname + qname_len;
+    unsigned char *current = domain_name;
+    unsigned char *qname_end = qname + qname_len;
 
     while (qname < qname_end) {
         int label_len = *qname;
@@ -361,8 +383,8 @@ char *addDotsToName(char *qname) {
  * @param address Address to check
  * @return 1 if the address is IPv6, 0 otherwise
  */
-int isIPv6(const char *address) {
-    return (strchr(address, ':') != NULL);
+int isIPv6(unsigned char *address) {
+    return (strchr((const char *)address, ':') != NULL);
 }
 
 /**
@@ -370,56 +392,193 @@ int isIPv6(const char *address) {
  * @param address Address to check
  * @return 1 if the address is IPv4, 0 otherwise
  */
-int isIPv4(const char *address) {
-    return (strchr(address, '.') != NULL);
+int isIPv4(unsigned char *address) {
+    return (strchr((const char *)address, '.') != NULL);
 }
 
 /**
- * @brief Reverse IPv4/IPv6 address to create PTR record domain name (e.g. 1.2.3.4 -> 4.3.2.1.in-addr.arpa)
- * @param ip_address IP address to reverse
- * @return Reversed IP address
+ * @brief Expand compressed IPv6 address (e.g. 2001:db8::1 -> 2001:0db8:0000:0000:0000:0000:0000:0001)
+ * @param address Address to expand
+ * @return Expanded address
  */
-char *reverse_ip_address(char *ip_address) {
+
+unsigned char *expand_ipv6_address(unsigned char *compressed) {
+    unsigned char *decompressed = (unsigned char *)calloc(MAX_IPV6_LENGTH, sizeof(char));
+    char temp[5];
+    temp[0] = '\0';
+
+    int num_groups = 0;
+    int end_of_address = 0;
+    int colon_flag = 0;
+
+    while (*compressed != '\0' && !end_of_address) {
+        int i = 0;
+
+        while (*compressed != ':') {
+            colon_flag = 1;
+            if (*compressed == '\0') {
+                end_of_address = 1;
+                break;
+            }
+
+            temp[i++] = *compressed++;
+        }
+
+        printf("i: %d\n", i);
+
+        if (i == 0) {
+            printf("i == 0\n");
+            printf("Colon flag: %d\n", colon_flag);
+            if (colon_flag) {
+                // Count how many more colons are in the address
+                unsigned char *colon_ptr = compressed;
+                int num_colons = 0;
+                while (*colon_ptr != '\0') {
+                    if (*colon_ptr == ':') {
+                        num_colons++;
+                    }
+                    colon_ptr++;
+                }
+                // Check if it is the end of address
+
+                printf("Num colons: %d\n", num_colons);
+                int remaining_groups = 8 - num_groups - num_colons;
+                unsigned char *end_ptr = compressed;
+                if (*++end_ptr == '\0') {
+                    end_of_address = 1;
+                    remaining_groups++;
+                }
+                printf("Remaining groups: %d\n", remaining_groups);
+                for (int j = 0; j < remaining_groups; j++) {
+                    strcat((char *)decompressed, "0000");
+                    num_groups++;
+                    if (num_groups != 8) {
+                        strcat((char *)decompressed, ":");
+                    }
+                }
+            } else {
+                colon_flag = 1;
+                printf("Adding 4 zeros\n");
+                temp[0] = '0';
+                temp[1] = '0';
+                temp[2] = '0';
+                temp[3] = '0';
+            }
+        } else if (i == 1) {
+            // shift 3 zeroes to the right
+            temp[3] = temp[0];
+            temp[0] = '0';
+            temp[1] = '0';
+            temp[2] = '0';
+        } else if (i == 2) {
+            // shift 2 zeroes to the right
+            temp[3] = temp[1];
+            temp[2] = temp[0];
+            temp[0] = '0';
+            temp[1] = '0';
+        } else if (i == 3) {
+            // shift 1 zero to the right
+            temp[3] = temp[2];
+            temp[2] = temp[1];
+            temp[1] = temp[0];
+            temp[0] = '0';
+        }
+        printf("Temp: %s\n", temp);
+
+        strcat((char *)decompressed, temp);
+
+        if (num_groups != 8 && temp[0] != '\0') {
+            strcat((char *)decompressed, ":");
+        }
+        num_groups++;
+
+        temp[0] = '\0';
+
+        compressed++; // Move the pointer to the next character
+    }
+    printf("Decompressed: %s\n", decompressed);
+    return decompressed;
+}
+
+unsigned char *reverse_ipv4_address(unsigned char *ipv4_address) {
+    char reversedIp[INET_ADDRSTRLEN];
+    unsigned char *ptrDomain = (unsigned char *)malloc(sizeof(char) * 64);
+
+    // Split the IPv4 address into octets
+    unsigned int octet1, octet2, octet3, octet4;
+    if (sscanf((const char *)ipv4_address, "%u.%u.%u.%u", &octet4, &octet3, &octet2, &octet1) != 4) {
+        throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IPv4 address format" + string((char *)ipv4_address));
+    }
+
+    // Reverse the octets to create the PTR record domain name
+    snprintf(reversedIp, sizeof(reversedIp), "%u.%u.%u.%u", octet1, octet2, octet3, octet4);
+    snprintf((char *)ptrDomain, 64, "%s.in-addr.arpa", reversedIp);
+
+    return ptrDomain;
+}
+
+unsigned char *reverse_ipv6_address(unsigned char *ipv6_address) {
+    unsigned char *reversedIPv6 = (unsigned char *)calloc(64, sizeof(char)); // 32 characters + 31 dots + 1 null-terminator
+    unsigned char *ptrDomain = (unsigned char *)calloc(74, sizeof(char));    // 63 characters + 10 .ip6.arpa. + 1 null-terminator
+    ipv6_address = expand_ipv6_address(ipv6_address);
+    // create copy of the ipv6 address
+    unsigned char *ipv6_address_copy = ipv6_address;
+    printHex(ipv6_address, strlen((char *)ipv6_address));
+
+    // Split the IPv6 address into characters
+    unsigned char *tmp_ptr = reversedIPv6;
+    for (int i = 31; *ipv6_address_copy != '\0'; i--) {
+        printf("i: %d\n", i);
+        if (*ipv6_address_copy == ':') {
+            ipv6_address_copy++;
+            i++; // skip the colon, no character is added
+            continue;
+        }
+        *tmp_ptr++ = *ipv6_address_copy++;
+        if (i != 0) {
+            *tmp_ptr++ = '.';
+        }
+    }
+    *tmp_ptr = '\0';
+
+    printf("Reversed IPv6: %s\n", reversedIPv6);
+
+    // Create the PTR record domain name
+    int a = snprintf((char *)ptrDomain, 74, "%s.ip6.arpa", reversedIPv6);
+    printf("returned %d\n", a);
+    free(reversedIPv6);
+    free(ipv6_address);
+
+    return ptrDomain;
+}
+
+unsigned char *reverse_ip_address(unsigned char *ip_address) {
     if (ip_address == NULL) {
-        throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IP address format");
+        // Handle invalid IP address
+        return NULL;
     }
-    // IPv4
+
     if (isIPv4(ip_address)) {
-        char reversedIp[16]; // Max length of an IPv4 address is 15 characters
-        char ptrDomain[64];  // Max length of a PTR domain name
-
-        // Split the IPv4 address into octets
-        unsigned int octet1, octet2, octet3, octet4;
-        if (sscanf(ip_address, "%u.%u.%u.%u", &octet4, &octet3, &octet2, &octet1) != 4) {
-            throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IPv4 address format" + string(ip_address));
-        }
-
-        // Reverse the octets to create the PTR record domain name
-        snprintf(reversedIp, sizeof(reversedIp), "%u.%u.%u.%u", octet1, octet2, octet3, octet4);
-        snprintf(ptrDomain, sizeof(ptrDomain), "%s.in-addr.arpa", reversedIp);
-
-        return strdup(ptrDomain);
+        return reverse_ipv4_address(ip_address);
     } else if (isIPv6(ip_address)) {
-        char reversedIp[INET6_ADDRSTRLEN];
-        char ptrDomain[128]; // Max length of a PTR domain name
-
-        // If the IPv6 address is compresed (e.g. 2001:db8::1), expand it (e.g. 2001:0db8:0000:0000:0000:0000:0000:0001)
-        // TODO
-
-        // Split the IPv6 address into 8 groups of 4 hexadecimal digits
-        unsigned int hextet1, hextet2, hextet3, hextet4, hextet5, hextet6, hextet7, hextet8;
-        if (sscanf(ip_address, "%x:%x:%x:%x:%x:%x:%x:%x", &hextet8, &hextet7, &hextet6, &hextet5, &hextet4, &hextet3, &hextet2, &hextet1) != 8) {
-            throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IPv6 address format" + string(ip_address));
-        }
-
-        // Reverse the hextets to create the PTR record domain name
-        snprintf(reversedIp, sizeof(reversedIp), "%x.%x.%x.%x.%x.%x.%x.%x", hextet1, hextet2, hextet3, hextet4, hextet5, hextet6, hextet7, hextet8);
-        snprintf(ptrDomain, sizeof(ptrDomain), "%s.ip6.arpa", reversedIp);
-
-        return strdup(ptrDomain);
+        return reverse_ipv6_address(ip_address);
     } else {
-        throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IP address format");
+        // Handle invalid IP address format
+        return NULL;
     }
+    printf("Exiting reverse_ip_address\n");
+}
+
+/**
+ * @brief Print the hexadecimal representation of the data
+ * @param data Pointer to the data
+ * @param dataSize Size of the data
+ */
+void printHex(unsigned char *data, size_t dataSize) {
+    for (size_t i = 0; i < dataSize; i++) {
+        printf("%02X ", (unsigned char)data[i]);
+    }
+    printf("\n");
 }
 
 // Compile this file with the following command:
