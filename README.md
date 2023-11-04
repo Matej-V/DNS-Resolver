@@ -18,3 +18,10 @@ Na základe metód vyhľadávania možno DNS resolvery rozdeliť:
 DNS Resolver si môže ukladať záznamy prekladov, ktoré vykonal. Tieto uložené záznamy potom slúžia pre rýchlešie vyhľadanie adresy pre daný názov domény. Ak resolver nemá v cache potrebné záznamy začína prekladanie od root DNS servera a postupne sa dostáva až k autoritatívnym DNS serverom pre danú doménu.
 
 [1]: https://www.rfc-editor.org/rfc/rfc1035
+
+
+
+## Preklad
+```
+g++ -std=c++11 -Wall -Wextra -pedantic -o dns dns.cpp
+```
