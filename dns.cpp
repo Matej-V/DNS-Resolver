@@ -24,6 +24,7 @@ const map<int, string> dns_reply_codes = {
 /*Map for types of records*/
 const map<int, string> dns_record_types = {
     {1, "A"},
+    {2, "NS"},
     {5, "CNAME"},
     {6, "SOA"},
     {12, "PTR"},
@@ -184,6 +185,10 @@ unsigned char *parse_section(unsigned char *section_start, unsigned char *buffer
             char ip_buf[INET_ADDRSTRLEN];
             printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), inet_ntop(AF_INET, rdata, ip_buf, INET_ADDRSTRLEN));
             break;
+        case 2: // NS
+            result = qname_to_hostname(rdata, buffer);
+            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), result.hostname);
+            break;
         case 5: // CNAME
             result = qname_to_hostname(rdata, buffer);
             printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), result.hostname);
@@ -244,7 +249,9 @@ void parse_DNS_response(unsigned char *buffer) {
     DNS_question *qinfo = (DNS_question *)(buffer + sizeof(DNS_header) + result.offset);
     unsigned char *domain_name = result.hostname;
     int offset = result.offset;
-    printf("%s, %s, %d\n", domain_name, (dns_record_types.find(ntohs(qinfo->qtype))->second).c_str(), ntohs(qinfo->qclass));
+    const char *type = (dns_record_types.find(ntohs(qinfo->qtype))->second).c_str();
+    const char *class_ = (dns_classes.find(ntohs(qinfo->qclass))->second).c_str();
+    printf("%s, %s, %s\n", domain_name, type, class_);
     free(domain_name);
 
     // Print answer section
@@ -258,6 +265,7 @@ void parse_DNS_response(unsigned char *buffer) {
         printf("Authority section (%d)\n", ntohs(dns->auth_count));
         next_start = parse_section(next_start, buffer, ntohs(dns->auth_count));
     }
+
     // Print additional section
     if (ntohs(dns->add_count) > 0) {
         printf("Additional section (%d)\n", ntohs(dns->add_count));
@@ -377,12 +385,12 @@ Hostname_Result qname_to_hostname(unsigned char *qname_start, unsigned char *buf
     int offset = 0;
 
     int in_compression_flag = 0;
-    while (*ptr != 0) {
+    while (*ptr != '\0') {
         if ((*ptr & 0xC0) == 0xC0) { // Check for DNS compression pointer
             int pointer_offset = ((int)(*ptr & 0x3F) << 8) + *(ptr + 1);
             ptr = buf_ptr + pointer_offset;
 
-            offset += 1;
+            if (!in_compression_flag) offset += 1;
             in_compression_flag = 1;
         } else {
             int label_len = *ptr;
@@ -396,7 +404,7 @@ Hostname_Result qname_to_hostname(unsigned char *qname_start, unsigned char *buf
             if (!in_compression_flag) offset += label_len;
             ;
 
-            if (*ptr != 0) {
+            if (*ptr != '\0') {
                 *hostname_ptr = '.';
                 hostname_ptr++;
             }

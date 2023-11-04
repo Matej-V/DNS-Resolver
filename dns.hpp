@@ -27,7 +27,7 @@ enum return_codes {
 };
 
 /* A constant character array used for converting hexadecimal numbers to characters */
-const char hex_to_char[] = "0123456789ABCDEF";
+const char hex_to_char[] = "0123456789abcdef";
 
 /* Data structure to hold command line arguments */
 typedef struct {

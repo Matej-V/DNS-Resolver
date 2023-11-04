@@ -1,20 +1,15 @@
-% Tento soubor nahraďte vlastním souborem s obsahem práce.
 %=========================================================================
-% Autoři: Michal Bidlo, Bohuslav Křena, Jaroslav Dytrych, Petr Veigend a Adam Herout 2019
-
-% Pro kompilaci po částech (viz projekt.tex), nutno odkomentovat a upravit
-%\documentclass[../projekt.tex]{subfiles}
-%\begin{document}
+% Autor: Matej Vadovič, 2023
 
 \chapter{Úvod}
 \textbf{DNS resolver} je lokálny agent, ktorý je zodpovedný za dotazovanie DNS serverov a spracovávanie odpovedí za účelom prekladu doménového mena/IP adresy alebo získavaním iných informácií spojených s doménovým menom. Umožňuje tak užívateľom rýchlešiu a jednoduchšiu navigáciu na internete.~\cite{RFC1035}
 
-DNS resolver pracuje s distribuovaným, hierarchickým, stromovým doménovým priestorom. Tento priestor je rozdelený na \textbf{zóny}. Najvyšší bod hierarchie je \textbf{root DNS server}, ktorý obsahuje informácie o serveroch najvyššej úrovni (TLD - Top Level Domain), ktoré sú zodpovedné za správu domén pod nimi. Každá doména najvyššej úrovne má svojho správcu, ktorý je zodpovedný za správu domén pod ňou. Tento proces sa opakuje až na úroveň \textbf{autoritatívnych DNS serverov}, ktoré vykonávajú mapovanie názvu domény na adresu pre doménu danej organizácie. Bližší popis doménového priestoru možno nájsť \href{https://www.rfc-editor.org/rfc/rfc1034.txt}{tu}.
+DNS resolver pracuje s distribuovaným, hierarchickým, stromovým doménovým priestorom. Tento priestor je rozdelený na \textbf{zóny}. Najvyšší bod hierarchie je \textbf{root DNS server}, ktorý obsahuje informácie o serveroch najvyššej úrovni (TLD - Top Level Domain), ktoré sú zodpovedné za správu domén pod nimi. Každá doména najvyššej úrovne má svojho správcu, ktorý je zodpovedný za správu domén pod ňou. Tento proces sa opakuje až na úroveň \textbf{autoritatívnych DNS serverov}, ktoré vykonávajú mapovanie názvu domény na adresu pre doménu danej organizácie~\cite{enwiki:1182387275}. Bližší popis doménového priestoru možno nájsť tu~\cite{RFC1034}.
 
 Užívateľské programy interagujú s priestorom doménových mien pomocou resolveru. Resolver odpovedá na užívateľské dopyty informáciami, ktoré získa prostredníctvom dopytov na doménové servery a miestnu vyrovnávaciu pamäť. Na základe metód vyhľadávania možno DNS resolvery rozdeliť:
 \begin{itemize}
     \item Iteratívny - dotazuje niekoľko DNS serverov v hierarchickej štruktúre doménového priestoru. Tento proces sa opakuje až kým resolver nedostane záznam z autoritatívneho servera pre danú doménu.
-    \begin{figure}[ht]
+    \begin{figure}[ht!]
         \centering     % Center the image horizontally
         \includegraphics[width=0.6\textwidth]{obrazky-figures/Iterative.jpg}
         \caption{DNS resolver aplikujúci iteratívne dotazovanie}
@@ -25,21 +20,20 @@ Užívateľské programy interagujú s priestorom doménových mien pomocou reso
     
     \item Rekurzívny - dotazuje jeden DNS server, ktorý môže následne dotazovať ďalšie DNS servery. Tento proces na rozdiel od ne-rekurzívneho poskytuje kompletné riešenie pre danú doménu
     
-    \begin{figure}[ht]
+    \begin{figure}[ht!]
         \centering     % Center the image horizontally
         \includegraphics[width=0.6\textwidth]{obrazky-figures/Recursive.jpg}
         \caption{DNS resolver aplikujúci rekurzívne dotazovanie}
-        \label{fig:your-label}
+        \label{fig:recursive-DNS-resolver}
     \end{figure}
 \end{itemize}
 
-
-
-\chapter{Návrh aplikácie}
-
 \chapter{Popis implementácie}
+V rámci projektu som implementoval DNS resolver, ktorý podporuje iteratívne aj rekurzívne dotazovanie na IPv4 aj IPv6 adresy. Tiež podporuje reverzné dotazovanie, teda preklad IP adresy na doménové meno. Program je implementovaný v jazyku C++.
 
-\section{Spracovanie argumentov}
+Súčasťou projektu je aj testovací skript, ktorý testuje funkčnosť základných funkcií programu. Testovanie je popísané v kapitole~\ref{chap:testovanie}.
+
+\section{Spracovanie argumentov}\label{sec:argumenty}
 Pre spacovanie argumentov programu som použil knižnicu \textbf{getopt.h}. Táto knižnica umožňuje definovať argumenty programu a ich spracovanie. V prípade, že programu neboli predané argumenty, alebo boli predané argumenty, ktoré nie sú definované, program vypíše nápovedu a ukončí sa. V prípade, že boli predané argumenty, ktoré sú definované, program ich spracuje a uloží do štruktúry \textbf{s\_Arguments}. Táto štruktúra obsahuje všetky argumenty, ktoré program podporuje.
 
 Argumenty a prepínače, ktoré program podporuje sú:
@@ -55,7 +49,7 @@ Argumenty a prepínače, ktoré program podporuje sú:
 
 Poznámka ku kombinácií argumentov -x a -6 - v prípade, že sú tieto argumenty kombinované, program vypíše varovnú hlášku o ignorovaní argumentu -6 a pokračuje v spracovaní.
 
-\section{Komunikácia so DNS serverom}
+\section{Komunikácia s DNS serverom}
 Dotazovanie na DNS server je implementované v \texttt{main} funkcii. Tu je natavený socket pre UDP komunikáciu. O zaslanie a prijatie dotazu sa starajú funkcia \texttt{sendto()}, resp. \texttt{recvfrom()}. V prípade, že sa nepodarí zaslať dotaz, alebo prijať odpoveď, program vypíše chybovú hlášku a ukončí sa.
 
 Zostavovaniu jednotlivých častí DNS dotazu sa venujú nasledujúce sekcie.
@@ -63,19 +57,63 @@ Zostavovaniu jednotlivých častí DNS dotazu sa venujú nasledujúce sekcie.
 \section{DNS hlavička a dotaz}
 Zostavenie DNS hlavičky a nastavenie dotazu je zabezpečené vo funkcii \texttt{create\_DNS\_query}. Tu dochádza k naplneniu hodnôt v štruktúre hlavičky \texttt{DNS\_header} a nastavenie dotazu v štruktúre \texttt{DNS\_question}. Štruktúry som vytváral podľa definícií v sekcií 4.1. Format v~\cite{RFC1035}.
 
-\section{Prevod doménových mien do DNS formátu(QNAME)}
-O prevod doménového mena na DNS formát(Query Name) sa stará \texttt{hostname\_to\_qname} funkcia. Táto funkcia rozdelí doménové meno na jednotlivé časti, ktoré sú oddelené znakom \uv{.} a pridá k nim dĺžku danej časti. Tento postup je opakovaný až kým nie je celé doménové meno prevedené na DNS formát.
-
-\section{Reverzné dotazovanie}
-V programe je podpora pre reverzné dotazovanie IPv4 aj IPv6 adries. Dve funkcie, a to \texttt{reverse\_ipv4\_address} a \texttt{reverse\_ipv6\_address}, slúžia na prevod IPv4 a IPv6 adries na doménové mená. Následne už stačí len zavolať funkciu \texttt{hostname\_to\_qname} a doménové meno je pripravené na dotazovanie.
-
-
-
+\section{Prevod doménového mena na QNAME}
+Funkcia \texttt{hostname\_to\_qname} vykonáva prevod doménového mena na QNAME(Query Domain Name). Táto funkcia rozdelí doménové meno na jednotlivé časti, ktoré sú oddelené znakom \uv{.} a pridá k nim dĺžku danej časti. Tento postup je opakovaný až kým nie je celé doménové meno prevedené na DNS formát.
 
 \begin{gather*}
     \texttt{www.seznam.cz -> 3www5seznam2cz0}
 \end{gather*}
 
+\section{Reverzné dotazovanie}
+V programe je podpora pre reverzné dotazovanie IPv4 aj IPv6 adries. Dve funkcie, a to \texttt{reverse\_ipv4\_address} a \texttt{reverse\_ipv6\_address}, slúžia na prevod IPv4 a IPv6 adries na doménové mená. Následne už stačí len zavolať funkciu \texttt{hostname\_to\_qname} a doménové meno je pripravené na dotazovanie.
+
+\section{Spracovanie odpovede}
+Spracovanie odpovede servera raidi funkcia \texttt{parse\_DNS\_response}. Táto funkcia spracuje DNS hlavičku a následne spracuje odpoveď na dotaz. V prípade, že kód odpovede nie je \texttt{0}, vypíše sa na stdout aj daný kód a pokračuje spracovanie. Následne sú spracované sekcie \texttt{Answer}, \texttt{Authority} a \texttt{Additional}. Na to slúži funkcia \texttt{parse\_section}, ktorá spracuje jednotlivé záznamy v sekcií.
+
+Podporované typy záznamov sú:
+\begin{itemize}
+    \item \textbf{A} - IPv4 adresa
+    \item \textbf{NS} - autoritatívny DNS server
+    \item \textbf{AAAA} - IPv6 adresa
+    \item \textbf{CNAME} - alias
+    \item \textbf{PTR} - reverzný záznam
+    \item \textbf{SOA} - záznam o autoritatívnom DNS serveri
+\end{itemize}
+
+\section{Prevod z QNAME na doménové meno}
+Prevod z formátu QNAME na doménové meno je implementuje \texttt{qname\_to\_hostname}. Táto funkcia prechádza jednotlivé časti oddelené značkami. Funckia umožňuje aj prácu s kompresnými ukazateľmi, ktoré sú popísané v sekcií 4.1.4. Message compression~\cite{RFC1035}.
+
+\begin{gather*}
+    \texttt{3www5seznam2cz0 -> www.seznam.cz.}
+\end{gather*}
+
+\begin{figure}[ht]
+    \centering     % Center the image horizontally
+    \includegraphics[width=0.6\textwidth]{obrazky-figures/query_ipv6.jpg}
+    \caption{Dotazovanie o AAAA záznam pre doménové meno www.seznam.cz.}
+    \label{fig:query_ipv6}
+\end{figure}
+\begin{figure}[ht]
+    \centering     % Center the image horizontally
+    \includegraphics[width=0.6\textwidth]{obrazky-figures/rev_ipv6.jpg}
+    \caption{Reverzné dotazovanie na IPv6 adresu.}
+    \label{fig:rev_ipv6}
+\end{figure}
+\begin{figure}[ht]
+    \centering     % Center the image horizontally
+    \includegraphics[width=0.6\textwidth]{obrazky-figures/compress_pointer_test 3.jpg}
+    \caption{Ukážka spracovania odpovede, ktor8 obsahuje viacero záznamov z rôznych kategórií a tiež veľa kompresných ukazateľov, sekcia 4.1.4. Message compression~\cite{RFC1035}.}
+    \label{fig:compress_pointer_test_ipv6}
+\end{figure}
+
+\chapter{Testovanie}\label{chap:testovanie}
+
+
 
 
 \chapter{Použitie}
+Program je implementovaný v jazyku C++ a pozostáva zo súborov dns.cpp(implementácia tried a funkcií) a dns.hpp(deklarácie tried a funkcií).
+
+Preklad programu je možné vykonať pomocou príkazu \texttt{make} v koreňovom adresári projektu. Program sa spúšťa pomocou príkazu \texttt{./dns [-r] [-x] [-6] -s server [-p port] adresa}, viz. sekcia~\ref{sec:argumenty}.
+
+Testy možno spustiť pomocou príkazu \texttt{make test} v koreňovom adresári projektu.
