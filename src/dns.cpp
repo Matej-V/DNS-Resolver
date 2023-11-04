@@ -24,19 +24,15 @@ const map<int, string> dns_reply_codes = {
 /*Map for types of records*/
 const map<int, string> dns_record_types = {
     {1, "A"},
-    {2, "NS"},
     {5, "CNAME"},
     {6, "SOA"},
-    {11, "WKS"},
     {12, "PTR"},
-    {13, "HINFO"},
-    {15, "MX"},
-    {16, "TXT"},
     {28, "AAAA"}};
 
 const map<int, string> dns_classes = {
     {1, "IN"}}; // Internet
 
+/* Main program */
 int main(const int argc, char **argv) {
     try {
         S_Arguments *args = processArguments(argc, argv);
@@ -61,22 +57,18 @@ int main(const int argc, char **argv) {
         char buf[BUFSIZE];
         int size_of_query = createDNSQuery(args, (unsigned char *)buf);
 
-        printf("\nSending Packet...");
         if (sendto(client_socket, (char *)buf, size_of_query, 0, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
             throw ResolverException(SOCKET_FAILURE, "Error: Sendto failed");
         }
-        printf("Done\n");
 
         // Receive the answer
         int i = sizeof(server_address);
-        printf("Receiving answer...");
         if (recvfrom(client_socket, (char *)buf, BUFSIZE, 0, (struct sockaddr *)&server_address, (socklen_t *)&i) < 0) {
             throw ResolverException(SOCKET_FAILURE, "Error: Recvfrom failed");
         }
-        printf("Done\n\n");
 
         // Parse DNS response
-        parseDNSResponse((unsigned char *)buf, args);
+        parseDNSResponse((unsigned char *)buf);
         delete (args);
     } catch (const ResolverException &e) {
         if (e.returnCode != OK) {
@@ -90,6 +82,7 @@ int main(const int argc, char **argv) {
 
 /**
  * @brief Processes command line arguments and returns them in a structure.
+ *
  * @param argc Number of arguments
  * @param argv Array of arguments
  * @return Pointer to the structure with command line arguments
@@ -141,6 +134,7 @@ S_Arguments *processArguments(int argc, char *argv[]) {
 
 /**
  * @brief Parse section of the DNS response, e.g. answer section, suports only A, AAAA, CNAME, SOA and PTR records
+ *
  * @param section_start Pointer to the start of the section
  * @param buffer Pointer to the buffer with the DNS response, used for DNS Compression pointer
  * @param n Number of records in the section
@@ -167,32 +161,30 @@ unsigned char *parseSection(unsigned char *section_start, unsigned char *buffer,
 
         struct dns_resource_record *answer = (struct dns_resource_record *)(answer_start + qname_length);
         rdata = ((unsigned char *)answer + sizeof(struct dns_resource_record));
-        printHex(answer_start, sizeof(struct dns_resource_record) + ntohs(answer->data_len));
         const char *type = (dns_record_types.find(ntohs(answer->type))->second).c_str();
         const char *class_ = (dns_classes.find(ntohs(answer->_class))->second).c_str();
-        unsigned char *name = addDotsToName(qname);
+        unsigned char *name = qname_to_hostname(qname);
         unsigned char *mname;
         unsigned char *mailbox;
         soa_record *soa;
 
-        printf("Type: %d\n", ntohs(answer->type));
         switch (ntohs(answer->type)) {
         case 1: // A
             char ip_buf[INET_ADDRSTRLEN];
             printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), inet_ntop(AF_INET, rdata, ip_buf, INET_ADDRSTRLEN));
             break;
         case 5: // CNAME
-            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), addDotsToName(rdata));
+            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), qname_to_hostname(rdata));
             break;
         case 6: // SOA
             printf("%s, %s, %s, %d\n", name, type, class_, ntohl(answer->ttl));
             mname = (unsigned char *)rdata;
             mailbox = mname + strlen((const char *)mname) + 1;
             soa = (soa_record *)(rdata + strlen((const char *)mname) + 1 + strlen((const char *)mailbox) + 1);
-            printf("%s, %s, %d, %d, %d, %d, %d\n", addDotsToName(mname), addDotsToName(mailbox), ntohl(soa->serial), ntohl(soa->refresh), ntohl(soa->retry), ntohl(soa->expire), ntohl(soa->minimum));
+            printf("%s, %s, %d, %d, %d, %d, %d\n", qname_to_hostname(mname), qname_to_hostname(mailbox), ntohl(soa->serial), ntohl(soa->refresh), ntohl(soa->retry), ntohl(soa->expire), ntohl(soa->minimum));
             break;
         case 12: // PTR
-            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), addDotsToName(rdata));
+            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), qname_to_hostname(rdata));
             break;
         case 28: // AAAA
             char ip6_buf[INET6_ADDRSTRLEN];
@@ -214,10 +206,10 @@ unsigned char *parseSection(unsigned char *section_start, unsigned char *buffer,
 
 /**
  * @brief Parse DNS response
+ *
  * @param buffer Buffer with the DNS response
- * @param args Pointer to the structure with command line arguments
  */
-void parseDNSResponse(unsigned char *buffer, S_Arguments *args) {
+void parseDNSResponse(unsigned char *buffer) {
     // Print flag values
     struct dns_header *dns = (struct dns_header *)buffer;
     printf("Authoritative: %s, Recursive: %s, Truncated: %s\n", dns->aa ? "Yes" : "No", dns->rd ? "Yes" : "No", dns->tc ? "Yes" : "No");
@@ -226,7 +218,7 @@ void parseDNSResponse(unsigned char *buffer, S_Arguments *args) {
     printf("Question section (%d)\n", ntohs(dns->q_count));
     unsigned char *qname = (unsigned char *)(buffer + sizeof(struct dns_header));
     struct dns_question *qinfo = (struct dns_question *)(buffer + sizeof(struct dns_header) + strlen((const char *)qname) + 1);
-    unsigned char *domain_name = addDotsToName(qname);
+    unsigned char *domain_name = qname_to_hostname(qname);
     printf("%s, %s, %d\n", domain_name, (dns_record_types.find(ntohs(qinfo->qtype))->second).c_str(), ntohs(qinfo->qclass));
     free(domain_name);
 
@@ -250,6 +242,7 @@ void parseDNSResponse(unsigned char *buffer, S_Arguments *args) {
 
 /**
  * @brief Fill the buffer with the DNS query
+ *
  * @param args Pointer to the structure with command line arguments
  * @param buf_ptr Pointer to the buffer that will be sent to the server
  * @return Size of the created query
@@ -276,14 +269,13 @@ int createDNSQuery(S_Arguments *args, unsigned char *buf_ptr) {
     unsigned char *qname;
     if (args->inverse_query) {
         unsigned char *ptrDomain = reverse_ip_address(args->query);
-        printf("PTR domain: %s\n", ptrDomain);
         qname = createQname(ptrDomain);
         free(ptrDomain);
     } else {
         qname = createQname(args->query);
     }
     if (qname == NULL) {
-        throw ResolverException(OTHER_FAILURE, "Qname creation failed");
+        throw ResolverException(OTHER_FAILURE, "Qname creation failed. Check domain name format or IPv4/IPv6 address format.");
     }
     unsigned char *qname_ptr = buf_ptr + sizeof(struct dns_header);
     memcpy(qname_ptr, qname, strlen((const char *)qname) + 1); // Include the null-terminator
@@ -297,15 +289,17 @@ int createDNSQuery(S_Arguments *args, unsigned char *buf_ptr) {
 }
 
 /**
- * @brief Create qname. Converts query to qname. Example: www.fit.vutbr.cz -> \3www\3fit\5vutbr\2cz\0
- * https://stackoverflow.com/questions/34841206/why-is-the-content-of-qname-field-not-the-original-domain-in-a-dns-message
- * @param query Convert this address to qname
- * @return String with qname
+ * @brief Create a DNS-style QNAME from a query.
+ *
+ * This function takes a query and converts it into a DNS-style QNAME,
+ * which is a sequence of labels separated by dots. Returns a pointer
+ * to the newly created QNAME.
+ *
+ * @param query A null-terminated string containing the query to be converted.
+ * @return A pointer to the newly created QNAME, or NULL if an error occurs.
+ * @throws ResolverException
  */
 unsigned char *createQname(unsigned char *input) {
-    printf("In createQname\n");
-    printf("Query is: %s\n", input);
-
     // Check if the input is valid
     if (input == NULL) return NULL;
 
@@ -335,18 +329,20 @@ unsigned char *createQname(unsigned char *input) {
 
     *resultPtr = '\0'; // Null-terminate the qname
 
-    // DEBUG
-    printf("Qname is: %s\n", result);
-
     return result;
 }
 
 /**
- * @brief Add dots to the domain name, reverse function to createQname
- * @param qname Name with labels without dots
- * @return Name with dots between labels
+ * @brief Convert a DNS-style QNAME to a hostname string.
+ *
+ * Takes a DNS-style QNAME and converts it into a hostname
+ * string. Returns a pointer to the newly created hostname string.
+ *
+ * @param qname A pointer to the DNS-style QNAME to be converted.
+ * @return A pointer to the newly created hostname string, or NULL if an error occurs.
+ * @throws ResolverException
  */
-unsigned char *addDotsToName(unsigned char *qname) {
+unsigned char *qname_to_hostname(unsigned char *qname) {
     int qname_len = strlen((const char *)qname);
     unsigned char *domain_name = (unsigned char *)malloc(qname_len + 1); // +1 for the null-terminator
     if (domain_name == NULL) {
@@ -379,33 +375,19 @@ unsigned char *addDotsToName(unsigned char *qname) {
 }
 
 /**
- * @brief Simpe check if the address is IPv6
- * @param address Address to check
- * @return 1 if the address is IPv6, 0 otherwise
+ * @brief Expands compressed IPv6 address
+ *
+ * The IPv6 address is expanded to the full 128-bit representation. (e.g. 2001:db8::1 -> 2001:0db8:0000:0000:0000:0000:0000:0001)
+ *
+ * @param compressed Compressed IPv6 address
+ * @return A pointer to the expanded IPv6 address
  */
-int isIPv6(unsigned char *address) {
-    return (strchr((const char *)address, ':') != NULL);
-}
-
-/**
- * @brief Simpe check if the address is IPv4
- * @param address Address to check
- * @return 1 if the address is IPv4, 0 otherwise
- */
-int isIPv4(unsigned char *address) {
-    return (strchr((const char *)address, '.') != NULL);
-}
-
-/**
- * @brief Expand compressed IPv6 address (e.g. 2001:db8::1 -> 2001:0db8:0000:0000:0000:0000:0000:0001)
- * @param address Address to expand
- * @return Expanded address
- */
-
 unsigned char *expand_ipv6_address(unsigned char *compressed) {
-    unsigned char *decompressed = (unsigned char *)calloc(MAX_IPV6_LENGTH, sizeof(char));
+    unsigned char *decompressed = (unsigned char *)malloc(40 * sizeof(char)); // 32 characters + 7 colons + 1 null-terminator
     char temp[5];
     temp[0] = '\0';
+
+    // printHex(compressed, strlen((const char *)compressed));
 
     int num_groups = 0;
     int end_of_address = 0;
@@ -420,15 +402,10 @@ unsigned char *expand_ipv6_address(unsigned char *compressed) {
                 end_of_address = 1;
                 break;
             }
-
             temp[i++] = *compressed++;
         }
 
-        printf("i: %d\n", i);
-
         if (i == 0) {
-            printf("i == 0\n");
-            printf("Colon flag: %d\n", colon_flag);
             if (colon_flag) {
                 // Count how many more colons are in the address
                 unsigned char *colon_ptr = compressed;
@@ -441,14 +418,12 @@ unsigned char *expand_ipv6_address(unsigned char *compressed) {
                 }
                 // Check if it is the end of address
 
-                printf("Num colons: %d\n", num_colons);
                 int remaining_groups = 8 - num_groups - num_colons;
                 unsigned char *end_ptr = compressed;
                 if (*++end_ptr == '\0') {
                     end_of_address = 1;
                     remaining_groups++;
                 }
-                printf("Remaining groups: %d\n", remaining_groups);
                 for (int j = 0; j < remaining_groups; j++) {
                     strcat((char *)decompressed, "0000");
                     num_groups++;
@@ -483,7 +458,6 @@ unsigned char *expand_ipv6_address(unsigned char *compressed) {
             temp[1] = temp[0];
             temp[0] = '0';
         }
-        printf("Temp: %s\n", temp);
 
         strcat((char *)decompressed, temp);
 
@@ -500,6 +474,12 @@ unsigned char *expand_ipv6_address(unsigned char *compressed) {
     return decompressed;
 }
 
+/**
+ * @brief Reverse IPv4 address to create PTR record domain name
+ *
+ * @param ipv4_address A null-terminated string containing the IPv4 address in textual format.
+ * @return A pointer to the reversed IPv4 address
+ */
 unsigned char *reverse_ipv4_address(unsigned char *ipv4_address) {
     char reversedIp[INET_ADDRSTRLEN];
     unsigned char *ptrDomain = (unsigned char *)malloc(sizeof(char) * 64);
@@ -507,7 +487,7 @@ unsigned char *reverse_ipv4_address(unsigned char *ipv4_address) {
     // Split the IPv4 address into octets
     unsigned int octet1, octet2, octet3, octet4;
     if (sscanf((const char *)ipv4_address, "%u.%u.%u.%u", &octet4, &octet3, &octet2, &octet1) != 4) {
-        throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IPv4 address format" + string((char *)ipv4_address));
+        throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IPv4 address format: " + string((char *)ipv4_address));
     }
 
     // Reverse the octets to create the PTR record domain name
@@ -517,60 +497,71 @@ unsigned char *reverse_ipv4_address(unsigned char *ipv4_address) {
     return ptrDomain;
 }
 
+/**
+ * @brief Reverse IPv6 address to create PTR record domain name
+ *
+ * @param ipv6_address A null-terminated string containing the IPv6 address in textual format.
+ * @return A pointer to the reversed IPv6 address
+ */
 unsigned char *reverse_ipv6_address(unsigned char *ipv6_address) {
     unsigned char *reversedIPv6 = (unsigned char *)calloc(64, sizeof(char)); // 32 characters + 31 dots + 1 null-terminator
     unsigned char *ptrDomain = (unsigned char *)calloc(74, sizeof(char));    // 63 characters + 10 .ip6.arpa. + 1 null-terminator
-    ipv6_address = expand_ipv6_address(ipv6_address);
-    // create copy of the ipv6 address
-    unsigned char *ipv6_address_copy = ipv6_address;
-    printHex(ipv6_address, strlen((char *)ipv6_address));
 
-    // Split the IPv6 address into characters
-    unsigned char *tmp_ptr = reversedIPv6;
-    for (int i = 31; *ipv6_address_copy != '\0'; i--) {
-        printf("i: %d\n", i);
-        if (*ipv6_address_copy == ':') {
-            ipv6_address_copy++;
-            i++; // skip the colon, no character is added
-            continue;
-        }
-        *tmp_ptr++ = *ipv6_address_copy++;
-        if (i != 0) {
-            *tmp_ptr++ = '.';
-        }
+    struct in6_addr addr;
+    if (inet_pton(AF_INET6, (const char *)ipv6_address, &addr) != 1) {
+        return NULL;
     }
-    *tmp_ptr = '\0';
 
-    printf("Reversed IPv6: %s\n", reversedIPv6);
+    // Reverse the IPv6 address and insert dots after each 4 bits (nibble)
+    int offset = 0;
+    for (int i = 15; i >= 0; i--) {
+        unsigned char byte = addr.s6_addr[i];
+        sprintf((char *)reversedIPv6 + offset, "%02x.", byte);
+        offset += 3; // Move the offset by 3 characters for each byte
+    }
+
+    // Remove the trailing dot and null-terminate the string
+    reversedIPv6[offset - 1] = '\0';
 
     // Create the PTR record domain name
     int a = snprintf((char *)ptrDomain, 74, "%s.ip6.arpa", reversedIPv6);
-    printf("returned %d\n", a);
+    if (a < 0 || a >= 74) {
+        throw ResolverException(OTHER_FAILURE, "Error: Creating PTR record domain name failed. Insufficient buffer size.");
+    }
     free(reversedIPv6);
     free(ipv6_address);
 
     return ptrDomain;
 }
 
+/**
+ * @brief Reverse IPv4/IPv6 address to create PTR record domain name. Uses separate functions for IPv4 and IPv6 addresses.
+ *
+ * @param ip_address A null-terminated string containing the IP address in textual format.
+ * @return A pointer to the reversed IP address
+ */
 unsigned char *reverse_ip_address(unsigned char *ip_address) {
-    if (ip_address == NULL) {
-        // Handle invalid IP address
-        return NULL;
-    }
 
-    if (isIPv4(ip_address)) {
+    struct in6_addr ipv6;
+    struct in_addr ipv4;
+
+    if (inet_pton(AF_INET6, (const char *)ip_address, &ipv6) == 1) {
+        unsigned char *expanded = (unsigned char *)malloc(INET6_ADDRSTRLEN * sizeof(char));
+        inet_ntop(AF_INET6, &ipv6, (char *)expanded, INET6_ADDRSTRLEN);
+        printHex(expanded, strlen((const char *)expanded));
+        return reverse_ipv6_address(expanded);
+    } else if (inet_pton(AF_INET, (const char *)ip_address, &ipv4) == 1) {
         return reverse_ipv4_address(ip_address);
-    } else if (isIPv6(ip_address)) {
-        return reverse_ipv6_address(ip_address);
     } else {
-        // Handle invalid IP address format
-        return NULL;
+        throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IP address format: " + string((char *)ip_address));
     }
-    printf("Exiting reverse_ip_address\n");
 }
 
 /**
  * @brief Print the hexadecimal representation of the data
+ *
+ * Used for debugging purposes.
+ *
  * @param data Pointer to the data
  * @param dataSize Size of the data
  */
