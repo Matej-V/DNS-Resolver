@@ -5,11 +5,14 @@
  *
  */
 
-#include <cstring>  // std::strerror
-#include <getopt.h> // getopt
-#include <libnet.h> // libnet
-#include <map>      // map header
-#include <string>   // std::string
+#include <cstring>      // std::strerror
+#include <getopt.h>     // getopt
+#include <arpa/inet.h>  // address manipulation
+#include <netdb.h>      //getaddrpinfo
+#include <unistd.h>     // getpid
+#include <map>          // map header
+#include <string>       // std::string
+#include <errno.h>      // Include errno to access error code
 
 #define BUFSIZE 65536
 #define MAX_IPV6_LENGTH 40
@@ -169,15 +172,14 @@ unsigned char *hostname_to_qname(unsigned char *query);
 /**
  * @brief Convert a DNS-style QNAME to a hostname string.
  *
- * Takes a DNS-style QNAME and converts it into a hostname
- * string. Returns a pointer to the newly created hostname string.
+ * Takes a DNS-style QNAME and converts it into a hostname. Supports DNS Compression pointer.
  *
- * @param qname A pointer to the DNS-style QNAME to be converted.
- * @return A pointer to the newly created hostname string, or NULL if an error occurs.
+ * @param qname_start A pointer to the DNS-style QNAME to be converted.
+ * @param buf_ptr Pointer to the buffer that contains the DNS response, used for DNS Compression pointer
+ * @return A pointer to the newly created Hostname_Result structure
  * @throws ResolverException
  */
-// TODO
-Hostname_Result qname_to_hostname(unsigned char *qname, unsigned char *buffer);
+Hostname_Result *qname_to_hostname(unsigned char *qname, unsigned char *buffer);
 
 /**
  * @brief Reverse IPv4 address to create PTR record domain name

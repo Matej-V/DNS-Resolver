@@ -35,45 +35,70 @@ const map<int, string> dns_classes = {
 
 /* Main program */
 int main(const int argc, char **argv) {
+    s_arguments *args;
     try {
-        s_arguments *args = process_arguments(argc, argv);
-        int client_socket;
-        struct hostent *host;
-        struct sockaddr_in server_address; // Address of the DNS server
+        args = process_arguments(argc, argv);
 
-        // Get IP address of DNS server
-        if ((host = gethostbyname((char *)args->server)) == NULL) {
-            throw ResolverException(HOSTNAME_FAILURE, "Error: Unknown DNS server host: " + string((char *)args->server));
+        // Get IP addresses of the DNS server
+        struct addrinfo hints, *res;
+        memset(&hints, 0, sizeof hints);
+        hints.ai_family = AF_UNSPEC;     // Allow both IPv4 and IPv6
+        hints.ai_socktype = SOCK_DGRAM;  // Datagram socket
+        hints.ai_protocol = IPPROTO_UDP; // UDP protocol
+
+        int status = getaddrinfo((const char *)args->server, std::to_string(args->port).c_str(), &hints, &res);
+        if (status != 0) {
+            throw ResolverException(HOSTNAME_FAILURE, "Error: " + std::string(gai_strerror(status)));
         }
 
-        server_address.sin_family = AF_INET; // IPv4
-        server_address.sin_port = htons(args->port);
-        memcpy(&server_address.sin_addr, host->h_addr, host->h_length);
+        // Copy the first available address to 'server_address'
+        struct sockaddr_storage server_address;
+        socklen_t server_address_len;
+        memcpy(&server_address, res->ai_addr, res->ai_addrlen);
+        server_address_len = res->ai_addrlen;
+
+        freeaddrinfo(res); // Free the linked list of addresses
 
         // Create socket
-        if ((client_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) <= 0) {
+        int client_socket;
+        if ((client_socket = socket(server_address.ss_family, SOCK_DGRAM, IPPROTO_UDP)) <= 0) {
             throw ResolverException(SOCKET_FAILURE, "Error: Socket creation failed");
+        }
+
+        // Set socket timeout, so that the program doesn't hang when the server doesn't respond, 3 seconds
+        struct timeval timeout;
+        timeout.tv_sec = 3;
+        timeout.tv_usec = 0;
+        if (setsockopt(client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
+            throw ResolverException(SOCKET_FAILURE, "Error: Setsockopt failed");
         }
 
         char buf[BUFSIZE];
         int size_of_query = create_DNS_query(args, (unsigned char *)buf);
 
-        if (sendto(client_socket, (char *)buf, size_of_query, 0, (struct sockaddr *)&server_address, sizeof(server_address)) < 0) {
+        if (sendto(client_socket, buf, size_of_query, 0, (struct sockaddr *)&server_address, server_address_len) < 0) {
+            printf("Send to error: %s\n", strerror(errno));
             throw ResolverException(SOCKET_FAILURE, "Error: Sendto failed");
         }
 
         // Receive the answer
-        int i = sizeof(server_address);
-        if (recvfrom(client_socket, (char *)buf, BUFSIZE, 0, (struct sockaddr *)&server_address, (socklen_t *)&i) < 0) {
+        server_address_len = sizeof(server_address);
+        if (recvfrom(client_socket, buf, BUFSIZE, 0, (struct sockaddr *)&server_address, &server_address_len) < 0) {
             throw ResolverException(SOCKET_FAILURE, "Error: Recvfrom failed");
         }
 
         // Parse DNS response
         parse_DNS_response((unsigned char *)buf);
-        
-        delete (args);
+
+        // Close the socket
+        close(client_socket);
+
+        delete args;
     } catch (const ResolverException &e) {
-        fprintf(stderr, "%s\n", e.what());
+        delete args;
+        if (e.returnCode != OK) {
+            fprintf(stderr, "%s\n", e.what());
+        }
         return e.returnCode;
     }
 
@@ -92,10 +117,12 @@ s_arguments *process_arguments(int argc, char *argv[]) {
 
     /* Process arguments*/
     int opt;
+    int port;
     while ((opt = getopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
         switch (opt) {
         case 'h':
-            throw ResolverException(OK, "Usage: " + string(argv[0]) + " [-r] [-x] [-6] -s server [-p port] adresa");
+            printf("Usage: %s [-r] [-x] [-6] -s server [-p port] adresa\n", argv[0]);
+            exit(OK);
         case 'r':
             args->recursion_desired = 1;
             break;
@@ -110,10 +137,11 @@ s_arguments *process_arguments(int argc, char *argv[]) {
             break;
         case 'p':
             // check if port is between 0 and 65535
-            if (atoi(optarg) < 0 || atoi(optarg) > 65535) {
+            port = atoi(optarg);
+            if (port < 0 || port > 65535 || !isdigit(optarg[0])) {
                 throw ResolverException(INVALID_ARGUMENT, "Error: Invalid port number: " + string(optarg));
             }
-            args->port = atoi(optarg);
+            args->port = port;
 
             break;
         default:
@@ -165,49 +193,45 @@ unsigned char *parse_section(unsigned char *section_start, unsigned char *buffer
     }
 
     for (size_t i = 0; i < n; i++) {
-        Hostname_Result result = qname_to_hostname((unsigned char *)(answer_start), buffer);
-        int offset = result.offset;
-        unsigned char *name = result.hostname;
+        Hostname_Result *result = qname_to_hostname((unsigned char *)(answer_start), buffer);
+        int offset = result->offset;
+        unsigned char *name = result->hostname;
 
         DNS_resource_record *answer = (DNS_resource_record *)(answer_start + offset);
         rdata = ((unsigned char *)answer + sizeof(DNS_resource_record));
         const char *type = (dns_record_types.find(ntohs(answer->type))->second).c_str();
         const char *class_ = (dns_classes.find(ntohs(answer->_class))->second).c_str();
-        unsigned char *mname;
-        unsigned char *mailbox;
         SOA_record *soa;
 
-        int mname_offset;
-        int mailbox_offset;
+        Hostname_Result *mname_result = NULL;
+        Hostname_Result *mailbox_result = NULL;
 
+        Hostname_Result *rdata_result = qname_to_hostname(rdata, buffer);
         switch (ntohs(answer->type)) {
         case 1: // A
             char ip_buf[INET_ADDRSTRLEN];
             printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), inet_ntop(AF_INET, rdata, ip_buf, INET_ADDRSTRLEN));
             break;
         case 2: // NS
-            result = qname_to_hostname(rdata, buffer);
-            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), result.hostname);
+            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), rdata_result->hostname);
             break;
         case 5: // CNAME
-            result = qname_to_hostname(rdata, buffer);
-            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), result.hostname);
+            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), rdata_result->hostname);
             break;
         case 6: // SOA
             printf("%s, %s, %s, %d\n", name, type, class_, ntohl(answer->ttl));
-            result = qname_to_hostname((unsigned char *)rdata, buffer);
-            mname_offset = result.offset;
-            mname = result.hostname;
-            result = qname_to_hostname((unsigned char *)(rdata + mname_offset), buffer);
-            mailbox_offset = result.offset;
-            mailbox = result.hostname;
+            mname_result = qname_to_hostname((unsigned char *)rdata, buffer);
+            mailbox_result = qname_to_hostname((unsigned char *)(rdata + mname_result->offset), buffer);
+            soa = (SOA_record *)(rdata + mname_result->offset + mailbox_result->offset);
+            printf("%s, %s, %d, %d, %d, %d, %d\n", mname_result->hostname, mailbox_result->hostname, ntohl(soa->serial), ntohl(soa->refresh), ntohl(soa->retry), ntohl(soa->expire), ntohl(soa->minimum));
+            free(mname_result->hostname);
+            free(mname_result);
+            free(mailbox_result->hostname);
+            free(mailbox_result);
 
-            soa = (SOA_record *)(rdata + mname_offset + mailbox_offset);
-            printf("%s, %s, %d, %d, %d, %d, %d\n", mname, mailbox, ntohl(soa->serial), ntohl(soa->refresh), ntohl(soa->retry), ntohl(soa->expire), ntohl(soa->minimum));
             break;
         case 12: // PTR
-            result = qname_to_hostname(rdata, buffer);
-            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), result.hostname);
+            printf("%s, %s, %s, %d, %s\n", name, type, class_, ntohl(answer->ttl), rdata_result->hostname);
             break;
         case 28: // AAAA
             char ip6_buf[INET6_ADDRSTRLEN];
@@ -220,7 +244,11 @@ unsigned char *parse_section(unsigned char *section_start, unsigned char *buffer
 
         // Move to the next answer
         answer_start = (unsigned char *)answer + sizeof(DNS_resource_record) + ntohs(answer->data_len);
-        free(name);
+        // Now free all the allocated memory
+        free(result->hostname);
+        free(result);
+        free(rdata_result->hostname);
+        free(rdata_result);
     }
 
     // Return the pointer to the start of the next section
@@ -233,6 +261,9 @@ unsigned char *parse_section(unsigned char *section_start, unsigned char *buffer
  * @param buffer Buffer with the DNS response
  */
 void parse_DNS_response(unsigned char *buffer) {
+    if (buffer == NULL) {
+        return;
+    }
     // Print flag values
     DNS_header *dns = (DNS_header *)buffer;
     printf("Authoritative: %s, Recursive: %s, Truncated: %s\n", dns->aa ? "Yes" : "No", dns->rd ? "Yes" : "No", dns->tc ? "Yes" : "No");
@@ -245,10 +276,10 @@ void parse_DNS_response(unsigned char *buffer) {
     // Print question section
     printf("Question section (%d)\n", ntohs(dns->q_count));
 
-    Hostname_Result result = qname_to_hostname((unsigned char *)(buffer + sizeof(DNS_header)), buffer);
-    DNS_question *qinfo = (DNS_question *)(buffer + sizeof(DNS_header) + result.offset);
-    unsigned char *domain_name = result.hostname;
-    int offset = result.offset;
+    Hostname_Result *result = qname_to_hostname((unsigned char *)(buffer + sizeof(DNS_header)), buffer);
+    DNS_question *qinfo = (DNS_question *)(buffer + sizeof(DNS_header) + result->offset);
+    unsigned char *domain_name = result->hostname;
+    int offset = result->offset;
     const char *type = (dns_record_types.find(ntohs(qinfo->qtype))->second).c_str();
     const char *class_ = (dns_classes.find(ntohs(qinfo->qclass))->second).c_str();
     printf("%s, %s, %s\n", domain_name, type, class_);
@@ -271,6 +302,7 @@ void parse_DNS_response(unsigned char *buffer) {
         printf("Additional section (%d)\n", ntohs(dns->add_count));
         next_start = parse_section(next_start, buffer, ntohs(dns->add_count));
     }
+    free(result);
 }
 
 /**
@@ -318,7 +350,11 @@ int create_DNS_query(s_arguments *args, unsigned char *buf_ptr) {
     qinfo->qtype = args->inverse_query ? htons(12) : htons(args->record_type);
     qinfo->qclass = htons(1);
 
-    return sizeof(DNS_header) + strlen((const char *)QNAME) + 1 + sizeof(DNS_question);
+    int size_of_query = sizeof(DNS_header) + strlen((const char *)QNAME) + 1 + sizeof(DNS_question);
+
+    free(QNAME);
+
+    return size_of_query;
 }
 
 /**
@@ -372,11 +408,11 @@ unsigned char *hostname_to_qname(unsigned char *input) {
  *
  * @param qname_start A pointer to the DNS-style QNAME to be converted.
  * @param buf_ptr Pointer to the buffer that contains the DNS response, used for DNS Compression pointer
- * @return A pointer to the newly created hostname string.
+ * @return A pointer to the newly created Hostname_Result structure
  * @throws ResolverException
  */
-Hostname_Result qname_to_hostname(unsigned char *qname_start, unsigned char *buf_ptr) {
-    unsigned char *hostname = (unsigned char *)malloc(256 * sizeof(unsigned char));
+Hostname_Result * qname_to_hostname(unsigned char *qname_start, unsigned char *buf_ptr) {
+    unsigned char *hostname = (unsigned char *)calloc(256,  sizeof(unsigned char));
     if (hostname == NULL) {
         throw ResolverException(MEMORY_ALLOCATION_FAILURE, "Memory allocation failed");
     }
@@ -415,9 +451,12 @@ Hostname_Result qname_to_hostname(unsigned char *qname_start, unsigned char *buf
     *hostname_ptr = '\0';
     offset++;
 
-    Hostname_Result result;
-    result.hostname = hostname;
-    result.offset = offset;
+    Hostname_Result *result = (Hostname_Result *)malloc(sizeof(Hostname_Result));
+    if (result == NULL) {
+        throw ResolverException(MEMORY_ALLOCATION_FAILURE, "Memory allocation failed");
+    }
+    result->hostname = hostname;
+    result->offset = offset;
 
     return result;
 }
@@ -455,23 +494,26 @@ unsigned char *reverse_ipv4_address(unsigned char *ipv4_address) {
  */
 unsigned char *reverse_ipv6_address(unsigned char *ipv6_address) {
     uint8_t i6_addr[16];
-    unsigned char *ptr_domain = (unsigned char *)calloc(73, sizeof(char)); // 32 hex digits + 31 dots + 9 chars for the .ip6.arpa suffix + 1 null-terminator
+    unsigned char *ptr_domain = (unsigned char *)calloc(73, sizeof(char)); // 32 hex digits + 31 dots + 10 chars for the .ip6.arpa. suffix + 1 null-terminator
 
     if (inet_pton(AF_INET6, (const char *)ipv6_address, i6_addr) != 1) {
         throw ResolverException(INVALID_ADDRESS_FORMAT, "Error: Invalid IPv6 address format: " + string((char *)ipv6_address));
     }
 
     int offset = 62;
+
     char *reversed_ip = (char *)calloc(64, sizeof(char)); // 32 hex digits + 31 dots + 1 null-terminator
     for (int i = 0; i < 16; i++) {
         reversed_ip[offset--] = hex_to_char[i6_addr[i] >> 4];
         reversed_ip[offset--] = '.';
         reversed_ip[offset--] = hex_to_char[i6_addr[i] & 0x0F];
-        reversed_ip[offset--] = '.';
+        if (i != 15) reversed_ip[offset--] = '.';
     }
 
-    // Add the .ip6.arpa suffix
-    snprintf((char *)ptr_domain, 73, "%s.ip6.arpa", reversed_ip);
+    // Add the .ip6.arpa suffix and copy reversed_ip to ptr_domain
+    snprintf((char *)ptr_domain, 73, "%s.ip6.arpa.", reversed_ip);
+
+    free(reversed_ip);
 
     return ptr_domain;
 }
