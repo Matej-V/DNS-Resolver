@@ -2,6 +2,8 @@
 % Autor: Matej Vadovič, 2023
 
 \chapter{Úvod}
+Každé zariadenie v sieti je identifikované pomocou IP adresy. Táto adresa je však pre človeka ťažko zapamätateľná a preto sa používajú doménové mená. Je však potrebné mať mechanizmus, ktorý umožní prevod doménového mena na IP adresu a naopak. Tento mechanizmus je DNS(Domain Name System). Pri komunikácií dvoch zaridení je potrebné poznať jeho IP adresu, ktorú odosielateť správy získa od DNS serveru pomocou DNS dotazu. Tieto dotazy klienti posielajú prostredníctvom DNS resolveru.
+
 \textbf{DNS resolver} je lokálny agent, ktorý je zodpovedný za dotazovanie DNS serverov a spracovávanie odpovedí za účelom prekladu doménového mena/IP adresy alebo získavaním iných informácií spojených s doménovým menom. Umožňuje tak užívateľom rýchlešiu a jednoduchšiu navigáciu na internete.~\cite{RFC1035}
 
 DNS resolver pracuje s distribuovaným, hierarchickým, stromovým doménovým priestorom. Tento priestor je rozdelený na \textbf{zóny}. Najvyšší bod hierarchie je \textbf{root DNS server}, ktorý obsahuje informácie o serveroch najvyššej úrovni (TLD - Top Level Domain), ktoré sú zodpovedné za správu domén pod nimi. Každá doména najvyššej úrovne má svojho správcu, ktorý je zodpovedný za správu domén pod ňou. Tento proces sa opakuje až na úroveň \textbf{autoritatívnych DNS serverov}, ktoré vykonávajú mapovanie názvu domény na adresu pre doménu danej organizácie~\cite{enwiki:1182387275}. Bližší popis doménového priestoru možno nájsť tu~\cite{RFC1034}.
@@ -50,10 +52,10 @@ Pre spacovanie argumentov programu som použil knižnicu \textbf{getopt.h}. Tát
 \end{itemize}
 
 \section{Komunikácia s DNS serverom}
-Dotazovanie na DNS server je implementované v \texttt{main} funkcii. Rezolúciu domény DNS servera zabezpečuje funkcia \texttt{getaddrinfo}, ktorá podpuruje aj IPv6 adresy. Následne dochádza k vytvoreniu socketu pre komunikáciu protokolom UDP a vytvorenie dotazu. O zaslanie a prijatie dotazu na DNS server sa starajú funkcia \texttt{sendto()}, resp. \texttt{recvfrom()}. V prípade, že sa nepodarí zaslať dotaz, alebo prijať odpoveď, program vypíše chybovú hlášku a ukončí sa.
+Dotazovanie na DNS server je implementované v \texttt{main} funkcii. Rezolúciu domény DNS servera zabezpečuje funkcia \texttt{getaddrinfo}, ktorá podpuruje aj IPv6 adresy. Následne dochádza k vytvoreniu socketu pre komunikáciu protokolom UDP a vytvorenie dotazu. O zaslanie a prijatie dotazu na DNS server sa starajú funkcia \texttt{sendto()}, resp. \texttt{recvfrom()}. V prípade, že sa nepodarí zaslať dotaz, alebo prijať odpoveď(timeout je 3s), program vypíše chybovú hlášku a ukončí sa.
 Zostavovaniu jednotlivých častí DNS dotazu sa venujú nasledujúce sekcie.
 
-\section{DNS hlavička a dotaz}
+\subsection{DNS hlavička a dotaz}
 Zostavenie DNS hlavičky a nastavenie dotazu je zabezpečené vo funkcii \texttt{create\_DNS\_query}. Tu dochádza k naplneniu hodnôt v štruktúre hlavičky \texttt{DNS\_header} a nastavenie dotazu v štruktúre \texttt{DNS\_question}. Štruktúry som vytváral podľa definícií v sekcií 4.1. Format v~\cite{RFC1035}.
 
 \subsection{Prevod doménového mena na QNAME}
@@ -133,23 +135,13 @@ Tu používam rovnaké označenia ako sú uvedené sekcií 3.2 RR definitions~\c
     \centering
     \begin{tabular}{|c|c|c|c|c|}
         \hline
-        Name & TYPE & CLASS & TTL & RDATA \\
-        \hline
-    \end{tabular}
-    \caption{Popis výpisu záznamu PTR}
-\end{table}
-
-\begin{table}[!ht]
-    \centering
-    \begin{tabular}{|c|c|c|c|c|}
-        \hline
         Name & TYPE & CLASS & TTL & PTRDNAME \\
         \hline
     \end{tabular}
     \caption{Popis výpisu záznamu PTR}
 \end{table}
 
-\section{Prevod z QNAME na doménové meno}
+\subsection{Prevod z QNAME na doménové meno}
 Prevod z formátu QNAME na doménové meno je implementuje \texttt{qname\_to\_hostname}. Táto funkcia prechádza jednotlivé časti oddelené značkami. Funckia umožňuje aj prácu s kompresnými ukazateľmi, ktoré sú popísané v sekcií 4.1.4. Message compression~\cite{RFC1035}.
 
 \begin{gather*}
